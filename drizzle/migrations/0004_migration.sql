@@ -1,0 +1,1 @@
+alter table public.restaurants add column if not exists google_reviews jsonb, add column if not exists google_reviews_at timestamptz;

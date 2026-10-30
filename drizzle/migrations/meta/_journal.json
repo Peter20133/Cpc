@@ -1,0 +1,41 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1790919063164,
+      "tag": "0000_google_places_photos",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1791010343999,
+      "tag": "0001_add_review_count",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1791127802527,
+      "tag": "0002_monetization",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1791127819830,
+      "tag": "0003_fix_claim_offer_var",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1791358798870,
+      "tag": "0004_migration",
+      "breakpoints": true
+    }
+  ]
+}

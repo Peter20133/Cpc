@@ -1,0 +1,5 @@
+{
+  "name": "RestoMatch",
+  "description": "Găsește restaurantul potrivit în România și descoperă prânzul ideal la buget redus cu asistentul AI.",
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
