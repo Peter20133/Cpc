@@ -5,25 +5,23 @@ import {
   Send,
   X,
   MapPin,
-  Navigation,
-  ExternalLink,
-  Sparkles,
-  Phone,
-  Clock,
   Compass,
-  RotateCcw,
+  ArrowLeft,
+  ExternalLink,
 } from "lucide-react";
-import { C, DISPLAY, BODY } from "@/data/constants";
-import { askAIPranz, CheapLunchOption } from "@/lib/aiPranz.functions";
+import {
+  searchFastLunch,
+  detectClosestCity,
+  FastLunchItem,
+  ROMANIAN_CITIES_COORDS,
+} from "@/data/fastLunchData";
 
-type ChatMessage = {
+type Message = {
   id: string;
   sender: "user" | "ai";
-  text: string;
-  timestamp: string;
-  restaurants?: CheapLunchOption[];
-  detectedLocation?: string;
-  showLocationPrompt?: boolean;
+  text?: string;
+  results?: FastLunchItem[];
+  location?: string;
 };
 
 interface AIPranzChatProps {
@@ -32,116 +30,152 @@ interface AIPranzChatProps {
   onOpenRestaurant?: (id: number) => void;
 }
 
-export function AIPranzChat({ isOpen, onClose, onOpenRestaurant }: AIPranzChatProps) {
-  const [messages, setMessages] = useState<ChatMessage[]>(() => [
-    {
-      id: "welcome",
-      sender: "ai",
-      text: "Salut! Sunt asistentul tău culinar RestoMatch. Spune-mi ce ai poftă să mănânci la prânz — găsim ceva super gustos și ieftin lângă tine, sub 30 de lei!",
-      timestamp: "Acum",
-      showLocationPrompt: true,
-    },
-  ]);
-  const [inputText, setInputText] = useState("");
-  const [isLoading, setIsLoading] = useState(false);
-  const [isRecording, setIsRecording] = useState(false);
-  const [speechSupported, setSpeechSupported] = useState(false);
-  const [userCoords, setUserCoords] = useState<{ lat: number; lng: number } | null>(null);
-  const [locationState, setLocationState] = useState<"idle" | "requesting" | "granted" | "denied">("idle");
-  const [selectedRouteRestaurant, setSelectedRouteRestaurant] = useState<CheapLunchOption | null>(null);
+const STORAGE_KEY = "ai_pranz_location";
 
+export function AIPranzChat({ isOpen, onClose }: AIPranzChatProps) {
+  const [userCity, setUserCity] = useState<string>(() => {
+    try {
+      return localStorage.getItem(STORAGE_KEY) || "";
+    } catch {
+      return "";
+    }
+  });
+
+  const [userCoords, setUserCoords] = useState<{ lat: number; lng: number } | null>(null);
+  const [isLocating, setIsLocating] = useState(false);
+
+  const [messages, setMessages] = useState<Message[]>(() => {
+    const saved = typeof window !== "undefined" ? localStorage.getItem(STORAGE_KEY) : null;
+    if (saved) {
+      return [
+        {
+          id: "init",
+          sender: "ai",
+          text: `Locație: ${saved}. Ce mănânci azi cu 30 lei?`,
+        },
+      ];
+    }
+    return [
+      {
+        id: "init",
+        sender: "ai",
+        text: "În ce oraș ești? Alege din listă sau apasă „Folosește GPS”:",
+      },
+    ];
+  });
+
+  const [inputText, setInputText] = useState("");
+  const [activeMapItem, setActiveMapItem] = useState<FastLunchItem | null>(null);
+  const [isRecording, setIsRecording] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const recognitionRef = useRef<any>(null);
 
-  // Verificare suport SpeechRecognition
+  useEffect(() => {
+    if (isOpen) {
+      messagesEndRef.current?.scrollIntoView({ behavior: "instant" });
+    }
+  }, [messages, isOpen, activeMapItem]);
+
+  // Voice input
   useEffect(() => {
     const SpeechRec = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (SpeechRec) {
-      setSpeechSupported(true);
       const rec = new SpeechRec();
       rec.lang = "ro-RO";
       rec.continuous = false;
       rec.interimResults = false;
-
-      rec.onresult = (event: any) => {
-        const transcript = event.results[0]?.[0]?.transcript;
-        if (transcript) {
-          setInputText(transcript);
-          // Trimite automat mesajul după încheierea vorbirii
-          handleSendMessage(transcript);
+      rec.onresult = (e: any) => {
+        const text = e.results[0]?.[0]?.transcript;
+        if (text) {
+          setInputText(text);
+          executeSearch(text);
         }
       };
-
-      rec.onerror = (err: any) => {
-        console.warn("Speech recognition error:", err);
-        setIsRecording(false);
-      };
-
-      rec.onend = () => {
-        setIsRecording(false);
-      };
-
+      rec.onend = () => setIsRecording(false);
+      rec.onerror = () => setIsRecording(false);
       recognitionRef.current = rec;
     }
-  }, [userCoords]);
+  }, [userCity, userCoords]);
 
-  // Derulare la ultimul mesaj
-  useEffect(() => {
-    if (isOpen) {
-      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  const saveCity = (city: string) => {
+    try {
+      localStorage.setItem(STORAGE_KEY, city);
+      setUserCity(city);
+    } catch {
+      // ignore
     }
-  }, [messages, isOpen, isLoading]);
+  };
 
-  // Închidere la tasta Escape
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+  const executeSearch = (query: string, explicitCoords?: { lat: number; lng: number } | null) => {
+    const q = query.trim();
+    if (!q) return;
+
+    setInputText("");
+
+    const userMsg: Message = { id: String(Date.now()), sender: "user", text: q };
+
+    const coordsToUse = explicitCoords !== undefined ? explicitCoords : userCoords;
+
+    const { location, results } = searchFastLunch(q, coordsToUse, userCity || undefined);
+
+    if (location && location !== userCity) {
+      saveCity(location);
+    }
+
+    const aiMsg: Message = {
+      id: String(Date.now() + 1),
+      sender: "ai",
+      location,
+      results,
     };
-    if (isOpen) window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [isOpen, onClose]);
 
-  // Solicitare Geolocation
-  const requestLocation = () => {
+    setMessages((prev) => [...prev, userMsg, aiMsg]);
+  };
+
+  // Buton real GPS: detectează coordonatele reale ale utilizatorului
+  const handleUseMyLocation = () => {
     if (!navigator.geolocation) {
-      setLocationState("denied");
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: String(Date.now()),
+          sender: "ai",
+          text: "Geolocația nu este suportată în acest browser. În ce oraș ești?",
+        },
+      ]);
       return;
     }
-    setLocationState("requesting");
+
+    setIsLocating(true);
+
     navigator.geolocation.getCurrentPosition(
       (pos) => {
+        setIsLocating(false);
         const coords = { lat: pos.coords.latitude, lng: pos.coords.longitude };
         setUserCoords(coords);
-        setLocationState("granted");
-        // Trimite un mic mesaj de confirmare
+        const realCity = detectClosestCity(coords.lat, coords.lng);
+        saveCity(realCity);
+
+        // Căutare instantanee cu coordonatele reale
+        executeSearch("Lângă mine", coords);
+      },
+      (err) => {
+        setIsLocating(false);
         setMessages((prev) => [
           ...prev,
           {
             id: String(Date.now()),
             sender: "ai",
-            text: "Te-am localizat cu succes prin GPS! Spune-mi ce vrei să mănânci azi (ex: 'Vreau să mănânc cu 30 de lei la prânz' sau 'Ceva ieftin lângă mine').",
-            timestamp: new Date().toLocaleTimeString("ro-RO", { hour: "2-digit", minute: "2-digit" }),
+            text: "Nu am putut accesa GPS-ul. Alege orașul tău mai jos sau scrie-l în chat.",
           },
         ]);
       },
-      () => {
-        setLocationState("denied");
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: String(Date.now()),
-            sender: "ai",
-            text: "Nu am putut accesa locația ta automată. În ce zonă sau oraș ești? (ex: Craiova Centru, București Unirii, Cluj etc.)",
-            timestamp: new Date().toLocaleTimeString("ro-RO", { hour: "2-digit", minute: "2-digit" }),
-          },
-        ]);
-      },
-      { timeout: 9000, enableHighAccuracy: true },
+      { timeout: 8000, enableHighAccuracy: true },
     );
   };
 
   const toggleRecording = () => {
-    if (!speechSupported || !recognitionRef.current) return;
+    if (!recognitionRef.current) return;
     if (isRecording) {
       recognitionRef.current.stop();
       setIsRecording(false);
@@ -149,429 +183,246 @@ export function AIPranzChat({ isOpen, onClose, onOpenRestaurant }: AIPranzChatPr
       try {
         recognitionRef.current.start();
         setIsRecording(true);
-      } catch (err) {
-        console.error("Nu s-a putut porni recunoașterea vocală:", err);
+      } catch {
+        setIsRecording(false);
       }
     }
   };
 
-  const handleSendMessage = async (rawText?: string) => {
-    const query = (rawText ?? inputText).trim();
-    if (!query || isLoading) return;
-
-    setInputText("");
-    const userMsgId = String(Date.now());
-    const nowStr = new Date().toLocaleTimeString("ro-RO", { hour: "2-digit", minute: "2-digit" });
-
-    setMessages((prev) => [
-      ...prev,
-      {
-        id: userMsgId,
-        sender: "user",
-        text: query,
-        timestamp: nowStr,
-      },
-    ]);
-
-    setIsLoading(true);
-
-    try {
-      // Apelăm server function askAIPranz
-      const res = await askAIPranz({
-        data: {
-          message: query,
-          latitude: userCoords?.lat ?? null,
-          longitude: userCoords?.lng ?? null,
-          areaQuery: query,
-        },
-      });
-
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: String(Date.now() + 1),
-          sender: "ai",
-          text: res.message,
-          timestamp: new Date().toLocaleTimeString("ro-RO", { hour: "2-digit", minute: "2-digit" }),
-          restaurants: res.restaurants,
-          detectedLocation: res.detectedLocation,
-        },
-      ]);
-    } catch (error) {
-      console.error("Eroare AI Pranz:", error);
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: String(Date.now() + 1),
-          sender: "ai",
-          text: "Scuze, am întâmpinat o mică problemă la căutare. Te rog încearcă din nou sau specifică orașul în care ești (ex: '30 lei prânz în Craiova').",
-          timestamp: new Date().toLocaleTimeString("ro-RO", { hour: "2-digit", minute: "2-digit" }),
-        },
-      ]);
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const quickPrompts = [
-    "Vreau să mănânc cu 30 de lei la prânz",
-    "Ceva ieftin lângă mine",
-    "Meniul zilei sub 35 lei",
-    "Shaorma sau burger rapid",
-  ];
+  const quickCities = ["București", "Cluj-Napoca", "Timișoara", "Iași", "Brașov", "Craiova", "Constanța", "Sibiu"];
 
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-5 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200">
-      <div
-        className="flex flex-col w-full max-w-2xl bg-[#FFFDF9] rounded-2xl sm:rounded-3xl shadow-2xl border border-[#E7E4DC] overflow-hidden"
-        style={{ height: "min(88vh, 740px)", maxHeight: "100%" }}
-      >
-        {/* Header Chat */}
-        <div
-          className="flex items-center justify-between px-5 py-4 border-b border-[#E7E4DC]"
-          style={{ background: `linear-gradient(135deg, ${C.green} 0%, #20352B 100%)` }}
-        >
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-2xl bg-[#B95635] text-white flex items-center justify-center shadow-md">
-              <Sparkles size={20} className="animate-pulse" />
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <h3 style={{ fontFamily: DISPLAY }} className="font-semibold text-lg text-white">
-                  AI Prânz — 30 Lei
-                </h3>
-                <span className="text-[11px] font-medium bg-white/20 text-[#FFFDF9] px-2 py-0.5 rounded-full">
-                  RestoMatch AI
-                </span>
-              </div>
-              <p className="text-xs text-white/70">
-                {locationState === "granted" ? "📍 GPS activat" : "Recomandări inteligente la preț de student"}
-              </p>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-2">
-            {locationState !== "granted" && (
-              <button
-                onClick={requestLocation}
-                title="Activează locația GPS"
-                className="hidden sm:flex items-center gap-1.5 text-xs bg-white/15 hover:bg-white/25 text-white px-2.5 py-1.5 rounded-xl transition-all"
-              >
-                <Navigation size={13} />
-                <span>Locație</span>
-              </button>
-            )}
-            <button
-              onClick={onClose}
-              aria-label="Închide chat"
-              className="w-9 h-9 rounded-full bg-white/10 hover:bg-white/20 text-white flex items-center justify-center transition-all"
-            >
-              <X size={18} />
-            </button>
-          </div>
-        </div>
-
-        {/* Zona Mesaje */}
-        <div className="flex-1 overflow-y-auto p-4 sm:p-5 space-y-4 bg-[#F7F5F0]/60">
-          {messages.map((msg) => (
-            <div
-              key={msg.id}
-              className={`flex flex-col ${msg.sender === "user" ? "items-end" : "items-start"}`}
-            >
-              <div className="flex items-end gap-2 max-w-[90%] sm:max-w-[82%]">
-                {msg.sender === "ai" && (
-                  <div className="w-7 h-7 rounded-full bg-[#304B3D] text-white flex-shrink-0 flex items-center justify-center text-xs shadow-sm mb-1">
-                    🤖
-                  </div>
-                )}
-
-                <div
-                  className={`rounded-2xl px-4 py-3 text-sm leading-relaxed shadow-sm ${
-                    msg.sender === "user"
-                      ? "bg-[#B95635] text-white rounded-br-xs"
-                      : "bg-[#FFFDF9] text-[#1D211E] border border-[#E7E4DC] rounded-bl-xs"
-                  }`}
-                  style={{ fontFamily: BODY }}
-                >
-                  <p className="whitespace-pre-line">{msg.text}</p>
-                </div>
-              </div>
-
-              {/* Solicitare inițială de locație dacă e prima intrare */}
-              {msg.showLocationPrompt && locationState === "idle" && (
-                <div className="mt-3 ml-9 max-w-sm">
-                  <button
-                    onClick={requestLocation}
-                    className="flex items-center gap-2 text-xs font-medium px-3.5 py-2 rounded-xl bg-[#304B3D] hover:bg-[#20352B] text-white transition-all shadow-sm"
-                  >
-                    <MapPin size={14} className="text-[#EBC9A4]" />
-                    <span>Permite locația pentru recomandări la pas</span>
-                  </button>
-                </div>
-              )}
-
-              {/* Carduri Interactive de Restaurante afișate sub mesaj */}
-              {msg.restaurants && msg.restaurants.length > 0 && (
-                <div className="w-full mt-3.5 ml-0 sm:ml-9 space-y-2.5 max-w-xl">
-                  {msg.restaurants.map((rest, index) => (
-                    <div
-                      key={rest.id || index}
-                      className="bg-[#FFFDF9] border border-[#E7E4DC] rounded-2xl p-3.5 shadow-sm hover:shadow-md transition-shadow flex flex-col sm:flex-row sm:items-center justify-between gap-3"
-                    >
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <span className="font-bold text-sm text-[#1D211E] truncate">
-                            📍 {rest.name}
-                          </span>
-                          <span className="text-[11px] font-semibold text-[#B95635] bg-[#F5E7DE] px-2 py-0.5 rounded-full">
-                            {rest.price} lei
-                          </span>
-                        </div>
-                        <p className="text-xs text-[#6F756D] mt-1 font-medium flex items-center gap-1.5 flex-wrap">
-                          <span className="text-[#304B3D] font-semibold">
-                            {rest.distanceMeters}m ({rest.walkingTimeMin} min pe jos 🚶)
-                          </span>
-                          <span>•</span>
-                          <span className="truncate">{rest.deal}</span>
-                        </p>
-                        {rest.address && (
-                          <p className="text-[11px] text-[#8F958D] mt-0.5 truncate">
-                            {rest.address}
-                          </p>
-                        )}
-                      </div>
-
-                      <div className="flex items-center gap-2 flex-shrink-0 pt-2 sm:pt-0 border-t sm:border-t-0 border-[#F0EEE8]">
-                        <button
-                          onClick={() => setSelectedRouteRestaurant(rest)}
-                          className="flex-1 sm:flex-initial flex items-center justify-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-xl bg-[#304B3D] hover:bg-[#20352B] text-white transition-colors"
-                        >
-                          <Compass size={13} />
-                          <span>Vezi traseul pe Maps</span>
-                        </button>
-                        {onOpenRestaurant && (
-                          <button
-                            onClick={() => {
-                              onOpenRestaurant(rest.id);
-                              onClose();
-                            }}
-                            className="flex items-center justify-center text-xs font-medium px-2.5 py-1.5 rounded-xl bg-[#F0EEE8] hover:bg-[#E7E4DC] text-[#1D211E] transition-colors"
-                          >
-                            <span>Detalii</span>
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              <span className="text-[10px] text-[#8F958D] mt-1 px-1">
-                {msg.timestamp}
-              </span>
-            </div>
-          ))}
-
-          {/* Indicator "AI se gândește..." */}
-          {isLoading && (
-            <div className="flex items-center gap-2.5 text-xs text-[#6F756D] ml-2 animate-pulse">
-              <div className="w-6 h-6 rounded-full bg-[#304B3D] text-white flex items-center justify-center text-[10px]">
-                🤖
-              </div>
-              <div className="bg-[#FFFDF9] border border-[#E7E4DC] px-3.5 py-2 rounded-2xl shadow-xs flex items-center gap-1.5">
-                <span className="w-2 h-2 rounded-full bg-[#B95635] animate-bounce" />
-                <span
-                  className="w-2 h-2 rounded-full bg-[#B95635] animate-bounce"
-                  style={{ animationDelay: "150ms" }}
-                />
-                <span
-                  className="w-2 h-2 rounded-full bg-[#B95635] animate-bounce"
-                  style={{ animationDelay: "300ms" }}
-                />
-                <span className="ml-1 font-medium">Caut cel mai bun prânz sub 30 lei...</span>
-              </div>
-            </div>
+    <div
+      className="fixed bottom-5 right-5 z-50 w-[380px] max-w-[calc(100vw-32px)] h-[520px] bg-white rounded-2xl shadow-2xl border border-stone-200 flex flex-col overflow-hidden animate-in fade-in slide-in-from-bottom-4 duration-150"
+      style={{ fontFamily: "'Inter', system-ui, sans-serif" }}
+    >
+      {/* Header Compact */}
+      <div className="flex items-center justify-between px-4 py-3 bg-[#304B3D] text-white">
+        <div className="flex items-center gap-2">
+          <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+          <h3 className="font-semibold text-sm tracking-tight">AI Prânz 30 Lei</h3>
+          {userCity && (
+            <span className="text-[11px] bg-white/20 px-2 py-0.5 rounded-full text-white/90 font-medium">
+              📍 {userCity}
+            </span>
           )}
-
-          <div ref={messagesEndRef} />
         </div>
 
-        {/* Sugestii rapide */}
-        <div className="px-4 py-2 border-t border-[#E7E4DC] bg-[#FFFDF9] flex items-center gap-2 overflow-x-auto no-scrollbar">
-          <span className="text-[11px] font-semibold text-[#8F958D] uppercase tracking-wider flex-shrink-0">
-            Sugestii:
-          </span>
-          {quickPrompts.map((prompt) => (
-            <button
-              key={prompt}
-              disabled={isLoading}
-              onClick={() => handleSendMessage(prompt)}
-              className="text-xs bg-[#F7F5F0] hover:bg-[#F5E7DE] hover:text-[#B95635] text-[#1D211E] px-3 py-1 rounded-full whitespace-nowrap transition-colors border border-[#E7E4DC] font-medium disabled:opacity-50"
-            >
-              {prompt}
-            </button>
-          ))}
-        </div>
-
-        {/* Zona Input (Voice + Text) */}
-        <div className="p-3.5 sm:p-4 bg-[#FFFDF9] border-t border-[#E7E4DC]">
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              handleSendMessage();
-            }}
-            className="flex items-center gap-2"
+        <div className="flex items-center gap-1.5">
+          <button
+            onClick={handleUseMyLocation}
+            disabled={isLocating}
+            title="Detectează locația GPS reală"
+            className="flex items-center gap-1 text-[11px] bg-white/15 hover:bg-white/25 text-white px-2 py-1 rounded-lg transition-colors cursor-pointer disabled:opacity-50"
           >
-            {/* Buton Vocal */}
-            {speechSupported && (
-              <button
-                type="button"
-                onClick={toggleRecording}
-                title={isRecording ? "Oprește înregistrarea" : "Vorbește în română (Voice Input)"}
-                className={`relative w-11 h-11 rounded-2xl flex items-center justify-center transition-all ${
-                  isRecording
-                    ? "bg-red-500 text-white animate-pulse shadow-md scale-105"
-                    : "bg-[#F7F5F0] hover:bg-[#F0EEE8] text-[#304B3D] border border-[#E7E4DC]"
-                }`}
-              >
-                {isRecording ? <MicOff size={20} /> : <Mic size={20} />}
-                {isRecording && (
-                  <span className="absolute -top-1 -right-1 w-3 h-3 bg-red-600 rounded-full animate-ping" />
-                )}
-              </button>
-            )}
-
-            {/* Câmp Text */}
-            <input
-              type="text"
-              value={inputText}
-              onChange={(e) => setInputText(e.target.value)}
-              placeholder={
-                isRecording
-                  ? "Te ascult... vorbește acum"
-                  : "Scrie: 'Vreau ceva cu 30 lei' sau 'prânz ieftin în Craiova'..."
-              }
-              disabled={isLoading}
-              className="flex-1 bg-[#F7F5F0] text-[#1D211E] text-sm px-4 py-2.5 rounded-2xl border border-[#E7E4DC] focus:outline-none focus:ring-2 focus:ring-[#B95635]/40 transition-all placeholder:text-[#8F958D]"
-            />
-
-            {/* Buton Trimitere */}
-            <button
-              type="submit"
-              disabled={!inputText.trim() || isLoading}
-              className="w-11 h-11 rounded-2xl bg-[#B95635] hover:bg-[#8E3C24] disabled:bg-[#E7E4DC] disabled:text-[#8F958D] text-white flex items-center justify-center transition-all shadow-sm"
-              title="Trimite mesajul"
-            >
-              <Send size={18} />
-            </button>
-          </form>
-
-          {isRecording && (
-            <p className="text-[11px] text-red-600 font-medium text-center mt-2 flex items-center justify-center gap-1.5 animate-pulse">
-              <span className="w-1.5 h-1.5 rounded-full bg-red-600" />
-              Microfon activ: Spune comanda ta în limba română...
-            </p>
-          )}
+            <MapPin size={11} className={isLocating ? "animate-bounce" : ""} />
+            <span>{isLocating ? "Detectez..." : "Folosește GPS"}</span>
+          </button>
+          <button
+            onClick={onClose}
+            aria-label="Închide"
+            className="w-7 h-7 rounded-full bg-white/10 hover:bg-white/20 text-white flex items-center justify-center transition-colors cursor-pointer"
+          >
+            <X size={15} />
+          </button>
         </div>
       </div>
 
-      {/* Modal Traseu Google Maps Embed */}
-      {selectedRouteRestaurant && (
-        <div className="fixed inset-0 z-60 flex items-center justify-center p-3 bg-black/70 backdrop-blur-xs animate-in fade-in duration-150">
-          <div className="bg-[#FFFDF9] rounded-2xl sm:rounded-3xl shadow-2xl border border-[#E7E4DC] w-full max-w-xl overflow-hidden flex flex-col">
-            <div className="p-4 border-b border-[#E7E4DC] flex items-center justify-between bg-[#F7F5F0]">
-              <div className="flex items-center gap-2">
-                <Compass className="text-[#304B3D]" size={18} />
-                <div>
-                  <h4 style={{ fontFamily: DISPLAY }} className="font-semibold text-sm sm:text-base text-[#1D211E]">
-                    Traseu pietonal către {selectedRouteRestaurant.name}
-                  </h4>
-                  <p className="text-xs text-[#6F756D]">
-                    {selectedRouteRestaurant.distanceMeters}m • aproximativ {selectedRouteRestaurant.walkingTimeMin} min pe jos 🚶
-                  </p>
-                </div>
-              </div>
-              <button
-                onClick={() => setSelectedRouteRestaurant(null)}
-                className="w-8 h-8 rounded-full bg-white border border-[#E7E4DC] flex items-center justify-center text-[#1D211E] hover:bg-gray-100"
-              >
-                <X size={16} />
-              </button>
-            </div>
+      {/* Vedere Traseu Google Maps când se apasă [Vezi pe Maps] */}
+      {activeMapItem ? (
+        <div className="flex-1 flex flex-col bg-white">
+          <div className="flex items-center justify-between p-2.5 bg-stone-100 border-b border-stone-200">
+            <button
+              onClick={() => setActiveMapItem(null)}
+              className="flex items-center gap-1.5 text-xs font-semibold text-[#1D211E] hover:text-[#B95635] cursor-pointer"
+            >
+              <ArrowLeft size={14} />
+              <span>Înapoi la chat</span>
+            </button>
+            <span className="text-xs font-bold text-[#304B3D] truncate max-w-[180px]">
+              {activeMapItem.name}
+            </span>
+          </div>
 
-            {/* Google Maps Walking Route Embed */}
-            <div className="relative w-full h-80 sm:h-96 bg-gray-100">
-              <iframe
-                title={`Traseu pe Maps către ${selectedRouteRestaurant.name}`}
-                width="100%"
-                height="100%"
-                style={{ border: 0 }}
-                loading="lazy"
-                src={`https://maps.google.com/maps?saddr=${
-                  userCoords ? `${userCoords.lat},${userCoords.lng}` : `${selectedRouteRestaurant.city}, Romania`
-                }&daddr=${selectedRouteRestaurant.latitude},${selectedRouteRestaurant.longitude}&dirflg=w&output=embed`}
-              />
-            </div>
+          <div className="flex-1 w-full bg-stone-200">
+            <iframe
+              title={`Traseu ${activeMapItem.name}`}
+              width="100%"
+              height="100%"
+              style={{ border: 0 }}
+              loading="eager"
+              src={`https://maps.google.com/maps?daddr=${activeMapItem.latitude},${activeMapItem.longitude}&dirflg=w&output=embed`}
+            />
+          </div>
 
-            <div className="p-4 bg-[#FFFDF9] flex items-center justify-between gap-3 border-t border-[#E7E4DC]">
-              <div className="text-xs text-[#1D211E]">
-                <p className="font-medium text-[#B95635]">{selectedRouteRestaurant.deal}</p>
-                <p className="text-[#8F958D] text-[11px] truncate max-w-xs">{selectedRouteRestaurant.address}</p>
-              </div>
-
-              <a
-                href={`https://www.google.com/maps/dir/?api=1&origin=${
-                  userCoords ? `${userCoords.lat},${userCoords.lng}` : ""
-                }&destination=${selectedRouteRestaurant.latitude},${selectedRouteRestaurant.longitude}&travelmode=walking`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="flex items-center gap-1.5 text-xs font-semibold px-4 py-2 rounded-xl bg-[#304B3D] hover:bg-[#20352B] text-white transition-colors"
-              >
-                <span>Deschide în Google Maps</span>
-                <ExternalLink size={13} />
-              </a>
-            </div>
+          <div className="p-2.5 bg-white border-t border-stone-200 flex items-center justify-between gap-2">
+            <span className="text-xs text-stone-600 font-medium">
+              {activeMapItem.distanceMeters}m ({activeMapItem.walkingTimeMin} min pe jos)
+            </span>
+            <a
+              href={`https://www.google.com/maps/dir/?api=1&destination=${activeMapItem.latitude},${activeMapItem.longitude}&travelmode=walking`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center gap-1 text-xs font-semibold px-2.5 py-1.5 rounded-lg bg-[#304B3D] text-white hover:bg-[#20352B]"
+            >
+              <span>Deschide Maps</span>
+              <ExternalLink size={11} />
+            </a>
           </div>
         </div>
+      ) : (
+        <>
+          {/* Listă Mesaje */}
+          <div className="flex-1 overflow-y-auto p-3.5 space-y-3 bg-[#FAF8F5]">
+            {messages.map((m) => (
+              <div
+                key={m.id}
+                className={`flex flex-col ${m.sender === "user" ? "items-end" : "items-start"}`}
+              >
+                {m.text && (
+                  <div
+                    className={`rounded-2xl px-3.5 py-2 text-xs leading-relaxed max-w-[85%] ${
+                      m.sender === "user"
+                        ? "bg-[#B95635] text-white rounded-br-xs"
+                        : "bg-white text-stone-800 border border-stone-200 shadow-xs rounded-bl-xs"
+                    }`}
+                  >
+                    {m.text}
+                  </div>
+                )}
+
+                {/* Butoane rapide de orașe când utilizatorul nu a ales încă */}
+                {m.id === "init" && !userCity && (
+                  <div className="w-full mt-2 flex flex-wrap gap-1.5">
+                    {quickCities.map((city) => (
+                      <button
+                        key={city}
+                        onClick={() => {
+                          saveCity(city);
+                          executeSearch(`Prânz în ${city}`);
+                        }}
+                        className="text-[11px] font-medium px-2 py-1 bg-white hover:bg-[#F5E7DE] hover:text-[#B95635] border border-stone-200 rounded-lg shadow-2xs transition-colors cursor-pointer"
+                      >
+                        {city}
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                {/* Rezultate curate: Doar [Vezi pe Maps] (fără Rezervă) */}
+                {m.results && m.results.length > 0 && (
+                  <div className="w-full mt-1.5 space-y-2">
+                    {m.results.map((r) => (
+                      <div
+                        key={r.id}
+                        className="bg-white border border-stone-200 rounded-xl p-2.5 shadow-xs hover:border-[#B95635]/50 transition-colors"
+                      >
+                        {/* Format exact cerut: Nume - Distanță - Preț - Ofertă */}
+                        <div className="text-xs font-semibold text-stone-900 leading-snug">
+                          <span className="text-stone-900 font-bold">{r.name}</span>
+                          <span className="text-stone-500 font-normal"> — {r.distanceMeters}m — </span>
+                          <span className="text-[#B95635] font-bold">{r.price} lei</span>
+                          <span className="text-stone-600 font-normal"> — {r.deal}</span>
+                        </div>
+
+                        {/* Doar butonul [Vezi pe Maps] - butonul de rezervă a fost scos */}
+                        <div className="mt-2 pt-1.5 border-t border-stone-100">
+                          <button
+                            onClick={() => setActiveMapItem(r)}
+                            className="w-full flex items-center justify-center gap-1.5 text-xs font-semibold py-1.5 px-3 rounded-lg bg-stone-100 hover:bg-[#304B3D] hover:text-white text-stone-800 cursor-pointer transition-colors"
+                          >
+                            <Compass size={13} className="text-[#304B3D] group-hover:text-white" />
+                            <span>Vezi pe Maps</span>
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
+            <div ref={messagesEndRef} />
+          </div>
+
+          {/* Doar 2 cipuri rapide */}
+          <div className="px-3 py-1.5 bg-white border-t border-stone-200 flex items-center gap-1.5">
+            <button
+              onClick={() => executeSearch("30 lei prânz")}
+              className="text-[11px] font-medium px-2.5 py-1 rounded-full bg-stone-100 hover:bg-[#F5E7DE] hover:text-[#B95635] text-stone-700 transition-colors border border-stone-200 cursor-pointer"
+            >
+              30 lei prânz
+            </button>
+            <button
+              onClick={() => executeSearch("Lângă mine")}
+              className="text-[11px] font-medium px-2.5 py-1 rounded-full bg-stone-100 hover:bg-[#F5E7DE] hover:text-[#B95635] text-stone-700 transition-colors border border-stone-200 cursor-pointer"
+            >
+              Lângă mine
+            </button>
+          </div>
+
+          {/* Formular Input */}
+          <div className="p-2.5 bg-white border-t border-stone-200">
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                executeSearch(inputText);
+              }}
+              className="flex items-center gap-1.5"
+            >
+              {recognitionRef.current && (
+                <button
+                  type="button"
+                  onClick={toggleRecording}
+                  className={`w-9 h-9 rounded-xl flex items-center justify-center transition-colors cursor-pointer ${
+                    isRecording ? "bg-red-500 text-white animate-pulse" : "bg-stone-100 text-stone-700 hover:bg-stone-200"
+                  }`}
+                  title="Voice input"
+                >
+                  {isRecording ? <MicOff size={16} /> : <Mic size={16} />}
+                </button>
+              )}
+
+              <input
+                type="text"
+                value={inputText}
+                onChange={(e) => setInputText(e.target.value)}
+                placeholder="Ce mănânci azi? 30 lei?"
+                className="flex-1 bg-stone-100 text-stone-900 text-xs px-3 py-2 rounded-xl border border-stone-200 focus:outline-none focus:ring-1 focus:ring-[#B95635]"
+              />
+
+              <button
+                type="submit"
+                disabled={!inputText.trim()}
+                className="w-9 h-9 rounded-xl bg-[#B95635] hover:bg-[#8E3C24] disabled:bg-stone-200 text-white flex items-center justify-center cursor-pointer transition-colors"
+              >
+                <Send size={15} />
+              </button>
+            </form>
+          </div>
+        </>
       )}
     </div>
   );
 }
 
 /**
- * Butonul plutitor de pe homepage cerut la Pasul 1:
- * "🎙️ Vorbeste cu AI-ul: Ce mananc azi?"
+ * Buton plutitor pe homepage: "🎙️ Ce mănânc azi? 30 lei"
  */
 export function AIPranzFloatingButton({ onClick }: { onClick: () => void }) {
   return (
     <button
       onClick={onClick}
-      className="fixed bottom-6 right-6 z-40 group flex items-center gap-2.5 px-4 py-3 rounded-full shadow-2xl transition-all duration-300 transform hover:scale-105 active:scale-95 border border-white/20"
-      style={{
-        background: `linear-gradient(135deg, ${C.accent} 0%, #8E3C24 100%)`,
-        boxShadow: "0 12px 32px rgba(185, 86, 53, 0.35)",
-      }}
+      className="fixed bottom-5 right-5 z-40 flex items-center gap-2 px-4 py-2.5 rounded-full shadow-lg transition-transform duration-150 hover:scale-105 active:scale-95 bg-[#B95635] text-white border border-white/20 cursor-pointer"
       aria-label="Vorbește cu AI-ul: Ce mănânc azi?"
     >
-      <span className="relative flex h-3 w-3">
+      <span className="relative flex h-2.5 w-2.5">
         <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-white opacity-75" />
-        <span className="relative inline-flex rounded-full h-3 w-3 bg-white" />
+        <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-white" />
       </span>
-
-      <span className="text-lg">🎙️</span>
-
-      <span
-        style={{ fontFamily: BODY }}
-        className="text-sm font-semibold text-white tracking-tight"
-      >
-        Vorbește cu AI-ul: Ce mănânc azi?
-      </span>
-
-      <span className="text-[10px] font-bold uppercase bg-white/25 text-white px-2 py-0.5 rounded-full ml-0.5">
-        Prânz 30 Lei
-      </span>
+      <span className="text-base">🎙️</span>
+      <span className="text-xs font-semibold">Ce mănânc azi? 30 lei</span>
     </button>
   );
 }
